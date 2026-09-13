@@ -24,4 +24,8 @@
     <string name="missing">Needed</string>
     <string name="running">Running</string>
     <string name="stopped">Stopped</string>
+    <string name="capture_mode_title">Instant capture</string>
+    <string name="capture_mode_desc">On: screenshots are instant, but Android shows a permanent screen-recording icon. Off: you allow capture on every tap, and the icon only flashes during capture.</string>
+    <string name="step3_desc_oneshot">No setup needed — you\'ll allow capture each time you tap the bubble.</string>
+    <string name="step3_btn_oneshot">Start bubble</string>
 </resources>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Muse "M" mark for the floating bubble (Muse blue on white). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="28dp"
+    android:height="28dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#2563EB"
+        android:pathData="M4,5 h3 l5,11 5,-11 h3 v15 h-3 v-9 l-5,8.5 -5,-8.5 v9 z" />
+</vector>

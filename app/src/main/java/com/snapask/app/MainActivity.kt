@@ -25,6 +25,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var btnCapture: Button
     private lateinit var btnToggle: Button
     private lateinit var step4Desc: TextView
+    private lateinit var step3Desc: TextView
+    private lateinit var swInstant: android.widget.Switch
 
     private val captureLauncher =
         registerForActivityResult(
@@ -40,7 +42,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                     startService(svc)
                 }
-                Toast.makeText(this, "Bubble started — look for the camera icon",
+                Toast.makeText(this, "Bubble started — look for the white bubble",
                     Toast.LENGTH_LONG).show()
             } else {
                 Toast.makeText(this, "Screen capture was not allowed", Toast.LENGTH_LONG).show()
@@ -64,6 +66,9 @@ class MainActivity : ComponentActivity() {
         btnCapture = findViewById(R.id.btnCapture)
         btnToggle = findViewById(R.id.btnToggle)
         step4Desc = findViewById(R.id.step4Desc)
+        step3Desc = findViewById(R.id.step3Desc)
+        swInstant = findViewById(R.id.swInstant)
+        swInstant.setOnCheckedChangeListener { _, checked -> onCaptureModeChanged(checked) }
         val btnNotif: Button = findViewById(R.id.btnNotif)
         val btnTarget: Button = findViewById(R.id.btnTarget)
 
@@ -87,9 +92,22 @@ class MainActivity : ComponentActivity() {
                     "Do step 1 first (overlay permission)", Toast.LENGTH_LONG).show()
                 return@setOnClickListener
             }
-            val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE)
-                    as MediaProjectionManager
-            captureLauncher.launch(mpm.createScreenCaptureIntent())
+            val persistent = getSharedPreferences(BubbleService.PREFS, MODE_PRIVATE)
+                .getBoolean(BubbleService.KEY_PERSISTENT, false)
+            if (persistent) {
+                val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+                        as MediaProjectionManager
+                captureLauncher.launch(mpm.createScreenCaptureIntent())
+            } else {
+                // Per-tap mode: the bubble needs no capture grant up front;
+                // consent happens on every tap via the gate activity.
+                val svc = Intent(this, BubbleService::class.java)
+                if (Build.VERSION.SDK_INT >= 29) startForegroundService(svc)
+                else startService(svc)
+                Toast.makeText(this, "Bubble started — look for the white bubble",
+                    Toast.LENGTH_LONG).show()
+                refresh()
+            }
         }
         btnTarget.setOnClickListener { pickTarget() }
         btnToggle.setOnClickListener {
@@ -102,6 +120,19 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        refresh()
+    }
+
+    private fun onCaptureModeChanged(checked: Boolean) {
+        getSharedPreferences(BubbleService.PREFS, MODE_PRIVATE).edit()
+            .putBoolean(BubbleService.KEY_PERSISTENT, checked)
+            .apply()
+        // Drop any persistent capture session so the mode switch takes
+        // effect immediately (idempotent when nothing is held).
+        if (BubbleService.running) {
+            startService(Intent(this, BubbleService::class.java)
+                .setAction(BubbleService.ACTION_RELEASE_CAPTURE))
+        }
         refresh()
     }
 
@@ -148,6 +179,22 @@ class MainActivity : ComponentActivity() {
         btnOverlay.isEnabled = !overlayOk
         btnOverlay.alpha = if (overlayOk) 0.4f else 1f
         btnToggle.visibility = if (BubbleService.running) View.VISIBLE else View.GONE
+
+        // Capture mode switch: sync without re-firing the listener, and adapt
+        // step 3 (in per-tap mode no capture grant is needed up front).
+        val persistent = prefs.getBoolean(BubbleService.KEY_PERSISTENT, false)
+        if (swInstant.isChecked != persistent) {
+            swInstant.setOnCheckedChangeListener(null)
+            swInstant.isChecked = persistent
+            swInstant.setOnCheckedChangeListener { _, checked -> onCaptureModeChanged(checked) }
+        }
+        if (persistent) {
+            step3Desc.text = getString(R.string.step3_desc)
+            btnCapture.text = getString(R.string.step3_btn)
+        } else {
+            step3Desc.text = getString(R.string.step3_desc_oneshot)
+            btnCapture.text = getString(R.string.step3_btn_oneshot)
+        }
     }
 
     private fun appLabelFor(pkg: String): String {

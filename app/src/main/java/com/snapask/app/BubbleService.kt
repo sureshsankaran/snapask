@@ -40,6 +40,12 @@ class BubbleService : Service() {
         const val PREFS = "snapask"
         const val KEY_TARGET_PKG = "targetPkg"
         const val KEY_TARGET_CLS = "targetCls"
+        /** true = keep a persistent capture session (instant taps, but Android
+         * shows a permanent recording icon). false = ask for consent on every
+         * tap (no persistent icon). */
+        const val KEY_PERSISTENT = "persistentCapture"
+        const val EXTRA_ONE_SHOT = "oneShot"
+        const val ACTION_RELEASE_CAPTURE = "com.snapask.app.RELEASE_CAPTURE"
         private const val CHANNEL_ID = "bubble"
         private const val NOTIF_ID = 1
 
@@ -71,6 +77,14 @@ class BubbleService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Mode switch from the settings UI: drop any persistent capture
+        // session immediately (idempotent when nothing is held).
+        if (intent?.action == ACTION_RELEASE_CAPTURE) {
+            releaseCapture()
+            try { mediaProjection?.stop() } catch (_: Exception) {}
+            mediaProjection = null
+            return START_STICKY
+        }
         val rc = intent?.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
             ?: Activity.RESULT_CANCELED
         @Suppress("DEPRECATION")
@@ -86,9 +100,23 @@ class BubbleService : Service() {
             if (fingerprint == usedResultFingerprint) {
                 return START_STICKY
             }
+            val oneShot = intent?.getBooleanExtra(EXTRA_ONE_SHOT, false) == true
             try {
                 val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE)
                         as MediaProjectionManager
+                if (oneShot) {
+                    // One-shot capture: build a throwaway projection, grab one
+                    // frame, then release everything. Nothing stays alive, so
+                    // Android shows no persistent recording indicator.
+                    val mp = mpm.getMediaProjection(rc, data)
+                    // Android 14+ (target 34): a callback must be registered
+                    // before createVirtualDisplay, or it throws SecurityException.
+                    mp.registerCallback(object : MediaProjection.Callback() {},
+                        handler)
+                    usedResultFingerprint = fingerprint
+                    oneShotCapture(mp)
+                    return START_STICKY
+                }
                 releaseCapture()
                 try { mediaProjection?.stop() } catch (_: Exception) {}
                 mediaProjection = null
@@ -202,17 +230,16 @@ class BubbleService : Service() {
     private fun addBubble() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         val tv = android.widget.ImageView(this).apply {
-            setImageResource(R.drawable.ic_camera)
-            // keep the glyph crisp white on the Muse-blue bubble
-            imageTintList = android.content.res.ColorStateList.valueOf(0xFFFFFFFF.toInt())
+            setImageResource(R.drawable.ic_muse)
+            // muse-blue M mark on a white bubble
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(0xE62563EB.toInt()) // muse_blue
+                setColor(0xFFFFFFFF.toInt()) // white
             }
-            val pad = dp(14)
+            val pad = dp(11)
             setPadding(pad, pad, pad, pad)
         }
-        val size = dp(58)
+        val size = dp(46)
         val params = WindowManager.LayoutParams(
             size, size,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -258,17 +285,65 @@ class BubbleService : Service() {
     // ---------- screenshot + share ----------
 
     private fun takeScreenshot() {
+        val persistent = getSharedPreferences(PREFS, MODE_PRIVATE)
+            .getBoolean(KEY_PERSISTENT, false)
         val reader = captureReader
-        if (reader == null || mediaProjection == null) {
-            Toast.makeText(this, "Screen capture not granted — open SnapAsk and allow it",
-                Toast.LENGTH_LONG).show()
-            return
+        if (persistent) {
+            if (reader == null || mediaProjection == null) {
+                Toast.makeText(this,
+                    "Screen capture not granted — open SnapAsk and allow it",
+                    Toast.LENGTH_LONG).show()
+                return
+            }
+            // Fast path: grab from the persistent pipeline; it stays alive.
+            grabFrameAndShare(reader) { /* keep persistent session */ }
+        } else {
+            // Per-tap mode: ask the system for fresh consent on every tap.
+            // Nothing is kept alive, so there is no persistent recording icon.
+            val gate = Intent(this, CaptureGateActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            try {
+                startActivity(gate)
+            } catch (t: Throwable) {
+                Toast.makeText(this, "Couldn't open capture prompt: ${t.message}",
+                    Toast.LENGTH_LONG).show()
+            }
         }
+    }
+
+    /**
+     * One-shot capture: creates a throwaway VirtualDisplay + ImageReader on
+     * the given projection, grabs one frame, then tears everything down.
+     */
+    private fun oneShotCapture(mp: MediaProjection) {
+        val metrics = resources.displayMetrics
+        val w = metrics.widthPixels
+        val h = metrics.heightPixels
+        val d = metrics.densityDpi
+        val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+        val vd = mp.createVirtualDisplay(
+            "snapask-oneshot", w, h, d,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            reader.surface, null, null
+        )
+        grabFrameAndShare(reader) {
+            try { vd.release() } catch (_: Exception) {}
+            try { reader.close() } catch (_: Exception) {}
+            try { mp.stop() } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Shared frame grab: hides the bubble, waits for the latest frame from
+     * [reader], saves it as PNG and shares it, then runs [onDone] (used to
+     * tear down one-shot pipelines; the persistent pipeline stays alive).
+     */
+    private fun grabFrameAndShare(reader: ImageReader, onDone: () -> Unit) {
         bubble?.visibility = View.INVISIBLE
         Thread {
             try {
                 Thread.sleep(250) // let the bubble disappear
-                // Persistent reader: drop any stale frame, then grab the latest.
                 var image = reader.acquireLatestImage()
                 var tries = 0
                 while (image == null && tries < 40) {
@@ -304,8 +379,7 @@ class BubbleService : Service() {
                         Toast.LENGTH_LONG).show()
                 }
             } finally {
-                // NOTE: the persistent VirtualDisplay/ImageReader stay alive
-                // across taps; only the bubble visibility is restored here.
+                try { onDone() } catch (_: Exception) {}
                 handler.post { bubble?.visibility = View.VISIBLE }
             }
         }.start()
