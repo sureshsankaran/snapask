@@ -116,7 +116,20 @@ class BubbleService : Service() {
                     mp.registerCallback(object : MediaProjection.Callback() {},
                         handler)
                     usedResultFingerprint = fingerprint
-                    oneShotCapture(mp)
+                    // Temporarily claim the mediaProjection foreground type
+                    // for this one capture: Android 14+ requires it for
+                    // createVirtualDisplay when the app has no foreground
+                    // activity (the consent gate already finished).
+                    mediaProjection = mp
+                    startAsForeground()
+                    try {
+                        oneShotCapture(mp)
+                    } catch (t: Throwable) {
+                        try { mp.stop() } catch (_: Exception) {}
+                        mediaProjection = null
+                        startAsForeground()
+                        throw t
+                    }
                     return START_STICKY
                 }
                 releaseCapture()
@@ -343,6 +356,10 @@ class BubbleService : Service() {
             try { vd.release() } catch (_: Exception) {}
             try { reader.close() } catch (_: Exception) {}
             try { mp.stop() } catch (_: Exception) {}
+            // One-shot session is over: drop back to the non-projection
+            // foreground type so no recording icon lingers.
+            if (mediaProjection === mp) mediaProjection = null
+            startAsForeground()
         }
     }
 
