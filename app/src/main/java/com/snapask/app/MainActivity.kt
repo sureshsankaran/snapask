@@ -133,6 +133,20 @@ class MainActivity : ComponentActivity() {
             startService(Intent(this, BubbleService::class.java)
                 .setAction(BubbleService.ACTION_RELEASE_CAPTURE))
         }
+        if (checked) {
+            // Instant mode needs a persistent capture session: ask for the
+            // system permission right away, otherwise the toggle appears to
+            // do nothing and taps fail with "not granted".
+            if (BubbleService.running && Settings.canDrawOverlays(this)) {
+                val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+                        as MediaProjectionManager
+                captureLauncher.launch(mpm.createScreenCaptureIntent())
+            } else {
+                Toast.makeText(this,
+                    "Instant capture on — finish setup below, then allow capture",
+                    Toast.LENGTH_LONG).show()
+            }
+        }
         refresh()
     }
 

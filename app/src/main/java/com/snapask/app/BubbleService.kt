@@ -138,7 +138,15 @@ class BubbleService : Service() {
                 releaseCapture()
                 try { mediaProjection?.stop() } catch (_: Exception) {}
                 mediaProjection = null
-                mediaProjection = mpm.getMediaProjection(rc, data)
+                // Claim the mediaProjection foreground type BEFORE
+                // getMediaProjection(): Android 14+ requires it at that point.
+                startAsForeground(projectionType = true)
+                mediaProjection = try {
+                    mpm.getMediaProjection(rc, data)
+                } catch (t: Throwable) {
+                    startAsForeground() // drop back to specialUse
+                    throw t
+                }
                 // Android 14+ (target 34): a callback must be registered before
                 // createVirtualDisplay, or it throws SecurityException.
                 mediaProjection?.registerCallback(object : MediaProjection.Callback() {
@@ -148,9 +156,9 @@ class BubbleService : Service() {
                 }, handler)
                 usedResultFingerprint = fingerprint
                 setupCapture()
-                // We now hold a live session: claim the mediaProjection
-                // foreground type (required on Android 14+ while capturing).
-                startAsForeground()
+                // Live session held: the mediaProjection foreground type is
+                // already claimed above (required on Android 14+ while
+                // capturing).
             } catch (t: Throwable) {
                 releaseCapture()
                 try { mediaProjection?.stop() } catch (_: Exception) {}
