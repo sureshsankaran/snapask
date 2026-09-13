@@ -56,11 +56,14 @@ class BubbleService : Service() {
     private var bubble: View? = null
     private var wm: WindowManager? = null
     private val handler = Handler(Looper.getMainLooper())
-    // The consent Intent we already built a projection from. Android 14 throws
-    // SecurityException ("Don't re-use the resultData...") if the same
-    // resultData is handed to getMediaProjection() twice, so we must skip
-    // redelivered/duplicate start commands.
-    private var usedResultFingerprint: String? = null
+    // The one-shot consent Intent we already built a projection from.
+    // Android 14 throws SecurityException ("Don't re-use the resultData...")
+    // if the same resultData is handed to getMediaProjection() twice, so we
+    // must skip redelivered/duplicate one-shot start commands. Scoped to
+    // one-shot only: persistent consents must never be deduped by intent
+    // content (separate grants can look identical, which wrongly skipped
+    // building the session after toggling instant mode on).
+    private var usedOneShotFingerprint: String? = null
     // Persistent capture pipeline: one VirtualDisplay + ImageReader per
     // projection, reused for every tap. Creating/releasing a display per tap
     // is what trips Android 14's reuse protections.
@@ -95,14 +98,23 @@ class BubbleService : Service() {
         else
             intent?.getParcelableExtra(EXTRA_DATA)
         if (rc == Activity.RESULT_OK && data != null) {
-            // Skip duplicate/redelivered commands carrying data we already used.
-            // NOTE: use toUri (includes extras) — filterEquals() ignores extras
-            // and would wrongly match a *fresh* consent.
-            val fingerprint = data.toUri(Intent.URI_INTENT_SCHEME)
-            if (fingerprint == usedResultFingerprint) {
+            val oneShot = intent?.getBooleanExtra(EXTRA_ONE_SHOT, false) == true
+            if (oneShot) {
+                // Skip duplicate/redelivered one-shot commands carrying data
+                // we already used.
+                // NOTE: use toUri (includes extras) — filterEquals() ignores
+                // extras and would wrongly match a *fresh* consent.
+                val fingerprint = data.toUri(Intent.URI_INTENT_SCHEME)
+                if (fingerprint == usedOneShotFingerprint) {
+                    return START_STICKY
+                }
+                usedOneShotFingerprint = fingerprint
+            } else if (mediaProjection != null && captureReader != null) {
+                // Persistent mode: already holding a live session, ignore the
+                // redelivery. A fresh consent with no live session must always
+                // build — never compare intent content here.
                 return START_STICKY
             }
-            val oneShot = intent?.getBooleanExtra(EXTRA_ONE_SHOT, false) == true
             try {
                 val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE)
                         as MediaProjectionManager
@@ -125,7 +137,6 @@ class BubbleService : Service() {
                     // before createVirtualDisplay, or it throws SecurityException.
                     mp.registerCallback(object : MediaProjection.Callback() {},
                         handler)
-                    usedResultFingerprint = fingerprint
                     try {
                         oneShotCapture(mp)
                     } finally {
@@ -154,7 +165,6 @@ class BubbleService : Service() {
                         handler.post { stopSelf() }
                     }
                 }, handler)
-                usedResultFingerprint = fingerprint
                 setupCapture()
                 // Live session held: the mediaProjection foreground type is
                 // already claimed above (required on Android 14+ while
@@ -174,6 +184,7 @@ class BubbleService : Service() {
 
     override fun onDestroy() {
         running = false
+        hideCloseTarget()
         try { bubble?.let { wm?.removeView(it) } } catch (_: Exception) {}
         bubble = null
         releaseCapture()
@@ -303,25 +314,62 @@ class BubbleService : Service() {
 
         var downX = 0f; var downY = 0f; var startX = 0; var startY = 0
         var moved = false
+        var longPressed = false
+        val longPress = Runnable {
+            longPressed = true
+            tv.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+            hideCloseTarget()
+            try {
+                startActivity(Intent(this, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (t: Throwable) {
+                Toast.makeText(this, "Couldn't open SnapAsk: ${t.message}",
+                    Toast.LENGTH_SHORT).show()
+            }
+        }
         tv.setOnTouchListener { v, e ->
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = e.rawX; downY = e.rawY
                     startX = params.x; startY = params.y
                     moved = false
+                    longPressed = false
+                    handler.postDelayed(longPress, 600)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (e.rawX - downX).toInt()
                     val dy = (e.rawY - downY).toInt()
-                    if (dx * dx + dy * dy > dp(8) * dp(8)) moved = true
+                    if (dx * dx + dy * dy > dp(8) * dp(8)) {
+                        moved = true
+                        handler.removeCallbacks(longPress)
+                        showCloseTarget()
+                    }
                     params.x = startX + dx
                     params.y = startY + dy
                     wm?.updateViewLayout(v, params)
+                    updateCloseTarget(params.x + size / 2, params.y + size / 2)
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (!moved) takeScreenshot()
+                    handler.removeCallbacks(longPress)
+                    if (longPressed) {
+                        longPressed = false
+                    } else if (moved && closeTargetArmed) {
+                        hideCloseTarget()
+                        stopSelf() // dropped on the X: close the bubble
+                    } else {
+                        hideCloseTarget()
+                        if (!moved) takeScreenshot()
+                    }
+                    moved = false
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    handler.removeCallbacks(longPress)
+                    hideCloseTarget()
+                    moved = false
+                    longPressed = false
                     true
                 }
                 else -> false
@@ -329,6 +377,70 @@ class BubbleService : Service() {
         }
         bubble = tv
         wm?.addView(tv, params)
+    }
+
+    // ---------- drag-to-close target ----------
+
+    private var closeView: View? = null
+    private var closeTargetArmed = false
+    private var closeCx = 0f
+    private var closeCy = 0f
+
+    /** Shows the X dismiss target at the bottom of the screen while dragging. */
+    private fun showCloseTarget() {
+        if (closeView != null) return
+        val s = dp(56)
+        val label = android.widget.TextView(this).apply {
+            text = "✕"
+            textSize = 22f
+            setTextColor(0xFFFFFFFF.toInt())
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0xCCB3261E.toInt()) // translucent red
+            }
+        }
+        val lp = WindowManager.LayoutParams(
+            s, s,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            y = dp(72)
+        }
+        closeView = label
+        closeTargetArmed = false
+        try {
+            wm?.addView(label, lp)
+        } catch (t: Throwable) {
+            closeView = null
+            return
+        }
+        val metrics = resources.displayMetrics
+        closeCx = metrics.widthPixels / 2f
+        closeCy = metrics.heightPixels - dp(72) - s / 2f
+    }
+
+    /** Highlights the X when the bubble hovers over it. */
+    private fun updateCloseTarget(bubbleCx: Int, bubbleCy: Int) {
+        val cv = closeView ?: return
+        val over = Math.abs(bubbleCx - closeCx) < dp(52) &&
+                Math.abs(bubbleCy - closeCy) < dp(52)
+        if (over != closeTargetArmed) {
+            closeTargetArmed = over
+            val target = if (over) 1.35f else 1f
+            cv.animate().scaleX(target).scaleY(target).setDuration(120).start()
+        }
+    }
+
+    private fun hideCloseTarget() {
+        closeTargetArmed = false
+        try {
+            closeView?.let { wm?.removeView(it) }
+        } catch (_: Throwable) {}
+        closeView = null
     }
 
     // ---------- screenshot + share ----------
