@@ -110,25 +110,28 @@ class BubbleService : Service() {
                     // One-shot capture: build a throwaway projection, grab one
                     // frame, then release everything. Nothing stays alive, so
                     // Android shows no persistent recording indicator.
-                    val mp = mpm.getMediaProjection(rc, data)
+                    // Claim the mediaProjection foreground type FIRST: on
+                    // Android 14+ getMediaProjection() itself throws
+                    // SecurityException unless the caller already runs a
+                    // foreground service of that type.
+                    startAsForeground(projectionType = true)
+                    val mp = try {
+                        mpm.getMediaProjection(rc, data)
+                    } catch (t: Throwable) {
+                        startAsForeground() // drop back to specialUse
+                        throw t
+                    }
                     // Android 14+ (target 34): a callback must be registered
                     // before createVirtualDisplay, or it throws SecurityException.
                     mp.registerCallback(object : MediaProjection.Callback() {},
                         handler)
                     usedResultFingerprint = fingerprint
-                    // Temporarily claim the mediaProjection foreground type
-                    // for this one capture: Android 14+ requires it for
-                    // createVirtualDisplay when the app has no foreground
-                    // activity (the consent gate already finished).
-                    mediaProjection = mp
-                    startAsForeground()
                     try {
                         oneShotCapture(mp)
-                    } catch (t: Throwable) {
+                    } finally {
                         try { mp.stop() } catch (_: Exception) {}
-                        mediaProjection = null
+                        // Drop back to specialUse: no lingering red indicator.
                         startAsForeground()
-                        throw t
                     }
                     return START_STICKY
                 }
@@ -220,7 +223,7 @@ class BubbleService : Service() {
 
     // ---------- foreground ----------
 
-    private fun startAsForeground() {
+    private fun startAsForeground(projectionType: Boolean = false) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= 26) {
             nm.createNotificationChannel(
@@ -235,9 +238,10 @@ class BubbleService : Service() {
             .build()
         // Android 14+ throws SecurityException if we claim the mediaProjection
         // foreground type without actually holding a live MediaProjection, so
-        // only use that type while a persistent session exists. In per-tap
-        // mode (no session held) run as specialUse instead.
-        if (Build.VERSION.SDK_INT >= 29 && mediaProjection != null) {
+        // only use that type while a persistent session exists, or while a
+        // one-shot capture explicitly requests it. In per-tap mode (no
+        // session held) run as specialUse instead.
+        if (Build.VERSION.SDK_INT >= 29 && (mediaProjection != null || projectionType)) {
             startForeground(NOTIF_ID, notif,
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } else if (Build.VERSION.SDK_INT >= 34) {
