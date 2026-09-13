@@ -83,6 +83,8 @@ class BubbleService : Service() {
             releaseCapture()
             try { mediaProjection?.stop() } catch (_: Exception) {}
             mediaProjection = null
+            // Drop back to the non-projection foreground type.
+            startAsForeground()
             return START_STICKY
         }
         val rc = intent?.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
@@ -130,6 +132,9 @@ class BubbleService : Service() {
                 }, handler)
                 usedResultFingerprint = fingerprint
                 setupCapture()
+                // We now hold a live session: claim the mediaProjection
+                // foreground type (required on Android 14+ while capturing).
+                startAsForeground()
             } catch (t: Throwable) {
                 releaseCapture()
                 try { mediaProjection?.stop() } catch (_: Exception) {}
@@ -211,13 +216,20 @@ class BubbleService : Service() {
         }
         val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("SnapAsk bubble is on")
-            .setContentText("Tap the camera bubble to screenshot & ask")
+            .setContentText("Tap the white bubble to screenshot & ask")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
             .build()
-        if (Build.VERSION.SDK_INT >= 29) {
+        // Android 14+ throws SecurityException if we claim the mediaProjection
+        // foreground type without actually holding a live MediaProjection, so
+        // only use that type while a persistent session exists. In per-tap
+        // mode (no session held) run as specialUse instead.
+        if (Build.VERSION.SDK_INT >= 29 && mediaProjection != null) {
             startForeground(NOTIF_ID, notif,
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        } else if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIF_ID, notif,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(NOTIF_ID, notif)
         }

@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="3"
-    android:versionName="1.2">
+    android:versionCode="4"
+    android:versionName="1.2.1">
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Android 11+: without this, queryIntentActivities() cannot see
@@ -36,7 +37,12 @@
         <service
             android:name=".BubbleService"
             android:exported="false"
-            android:foregroundServiceType="mediaProjection" />
+            android:foregroundServiceType="mediaProjection|specialUse">
+            <!-- Required on Android 14+ when using the specialUse type. -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the SnapAsk floating bubble alive so a screenshot can be taken and asked about from any app." />
+        </service>
 
         <!-- Transparent gate for per-tap capture consent (no persistent icon). -->
         <activity
