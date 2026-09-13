@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SnapAsk</string>
+    <string name="tagline">Screenshot anything → ask Muse</string>
+    <string name="status_title">Status</string>
+    <string name="setup_title">Setup</string>
+    <string name="step1_title">Display over other apps</string>
+    <string name="step1_desc">Lets the camera bubble float above any screen.</string>
+    <string name="step1_btn">Grant permission</string>
+    <string name="step2_title">Notifications</string>
+    <string name="step2_desc">Keeps the bubble service alive while you use your phone.</string>
+    <string name="step2_btn">Allow notifications</string>
+    <string name="step3_title">Screen capture</string>
+    <string name="step3_desc">Lets SnapAsk take a screenshot when you tap the bubble.</string>
+    <string name="step3_btn">Allow capture &amp; start bubble</string>
+    <string name="step4_title">App to ask</string>
+    <string name="step4_desc">Muse is used automatically. Tap to pick a different app.</string>
+    <string name="step4_btn">Change</string>
+    <string name="how_title">How it works</string>
+    <string name="how_text">Tap the floating camera bubble on any screen → the screenshot opens in Muse with the image attached → ask your question → press Back to return to what you were doing.\n\nDrag the bubble to move it anywhere.</string>
+    <string name="stop_bubble">Stop bubble</string>
+    <string name="done">Done</string>
+    <string name="granted">Granted</string>
+    <string name="missing">Needed</string>
+    <string name="running">Running</string>
+    <string name="stopped">Stopped</string>
+</resources>

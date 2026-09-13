@@ -1,0 +1,378 @@
+package com.snapask.app
+
+import android.app.Activity
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.ImageReader
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.util.DisplayMetrics
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
+import android.widget.TextView
+import android.widget.Toast
+import androidx.core.app.NotificationCompat
+import androidx.core.content.FileProvider
+import java.io.File
+import java.io.FileOutputStream
+
+class BubbleService : Service() {
+
+    companion object {
+        const val EXTRA_RESULT_CODE = "resultCode"
+        const val EXTRA_DATA = "data"
+        const val PREFS = "snapask"
+        const val KEY_TARGET_PKG = "targetPkg"
+        const val KEY_TARGET_CLS = "targetCls"
+        private const val CHANNEL_ID = "bubble"
+        private const val NOTIF_ID = 1
+
+        @Volatile var running = false
+    }
+
+    private var mediaProjection: MediaProjection? = null
+    private var bubble: View? = null
+    private var wm: WindowManager? = null
+    private val handler = Handler(Looper.getMainLooper())
+    // The consent Intent we already built a projection from. Android 14 throws
+    // SecurityException ("Don't re-use the resultData...") if the same
+    // resultData is handed to getMediaProjection() twice, so we must skip
+    // redelivered/duplicate start commands.
+    private var usedResultFingerprint: String? = null
+    // Persistent capture pipeline: one VirtualDisplay + ImageReader per
+    // projection, reused for every tap. Creating/releasing a display per tap
+    // is what trips Android 14's reuse protections.
+    private var captureReader: ImageReader? = null
+    private var captureDisplay: VirtualDisplay? = null
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        running = true
+        startAsForeground()
+        addBubble()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val rc = intent?.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
+            ?: Activity.RESULT_CANCELED
+        @Suppress("DEPRECATION")
+        val data: Intent? = if (Build.VERSION.SDK_INT >= 33)
+            intent?.getParcelableExtra(EXTRA_DATA, Intent::class.java)
+        else
+            intent?.getParcelableExtra(EXTRA_DATA)
+        if (rc == Activity.RESULT_OK && data != null) {
+            // Skip duplicate/redelivered commands carrying data we already used.
+            // NOTE: use toUri (includes extras) — filterEquals() ignores extras
+            // and would wrongly match a *fresh* consent.
+            val fingerprint = data.toUri(Intent.URI_INTENT_SCHEME)
+            if (fingerprint == usedResultFingerprint) {
+                return START_STICKY
+            }
+            try {
+                val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+                        as MediaProjectionManager
+                releaseCapture()
+                try { mediaProjection?.stop() } catch (_: Exception) {}
+                mediaProjection = null
+                mediaProjection = mpm.getMediaProjection(rc, data)
+                // Android 14+ (target 34): a callback must be registered before
+                // createVirtualDisplay, or it throws SecurityException.
+                mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                    override fun onStop() {
+                        handler.post { stopSelf() }
+                    }
+                }, handler)
+                usedResultFingerprint = fingerprint
+                setupCapture()
+            } catch (t: Throwable) {
+                releaseCapture()
+                try { mediaProjection?.stop() } catch (_: Exception) {}
+                mediaProjection = null
+                handler.post {
+                    Toast.makeText(this,
+                        "Screen capture failed: ${t.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        return START_STICKY
+    }
+
+    override fun onDestroy() {
+        running = false
+        try { bubble?.let { wm?.removeView(it) } } catch (_: Exception) {}
+        bubble = null
+        releaseCapture()
+        try { mediaProjection?.stop() } catch (_: Exception) {}
+        mediaProjection = null
+        super.onDestroy()
+    }
+
+    /** Creates the persistent VirtualDisplay + ImageReader for this projection. */
+    private fun setupCapture() {
+        val mp = mediaProjection ?: return
+        val metrics = resources.displayMetrics
+        val w = metrics.widthPixels
+        val h = metrics.heightPixels
+        val d = metrics.densityDpi
+        val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
+        val vd = mp.createVirtualDisplay(
+            "snapask", w, h, d,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            reader.surface, null, null
+        )
+        captureReader = reader
+        captureDisplay = vd
+    }
+
+    /** Releases the persistent capture pipeline. */
+    private fun releaseCapture() {
+        try { captureDisplay?.release() } catch (_: Exception) {}
+        captureDisplay = null
+        try { captureReader?.close() } catch (_: Exception) {}
+        captureReader = null
+    }
+
+    /**
+     * Finds the Muse app's image-share activity, if installed.
+     * Prefers an exact "Muse" label match, then any label/package containing "muse".
+     */
+    private fun resolveMuseTarget(): Pair<String, String>? {
+        val probe = Intent(Intent.ACTION_SEND).apply { type = "image/png" }
+        val infos = packageManager.queryIntentActivities(probe, 0)
+        val scored = infos.mapNotNull { ri ->
+            val ai = ri.activityInfo ?: return@mapNotNull null
+            if (!ai.exported) return@mapNotNull null
+            val label = ri.loadLabel(packageManager).toString()
+            val score = when {
+                label.equals("Muse", ignoreCase = true) -> 0
+                label.contains("muse", ignoreCase = true) -> 1
+                ai.packageName.contains("muse", ignoreCase = true) -> 2
+                else -> return@mapNotNull null
+            }
+            Triple(score, ai.packageName, ai.name)
+        }.sortedWith(compareBy({ it.first }, { it.second }))
+        return scored.firstOrNull()?.let { it.second to it.third }
+    }
+
+    // ---------- foreground ----------
+
+    private fun startAsForeground() {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= 26) {
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, "SnapAsk bubble", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
+        val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("SnapAsk bubble is on")
+            .setContentText("Tap the camera bubble to screenshot & ask")
+            .setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setOngoing(true)
+            .build()
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(NOTIF_ID, notif,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        } else {
+            startForeground(NOTIF_ID, notif)
+        }
+    }
+
+    // ---------- bubble ----------
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    private fun addBubble() {
+        wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        val tv = android.widget.ImageView(this).apply {
+            setImageResource(R.drawable.ic_camera)
+            // keep the glyph crisp white on the Muse-blue bubble
+            imageTintList = android.content.res.ColorStateList.valueOf(0xFFFFFFFF.toInt())
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0xE62563EB.toInt()) // muse_blue
+            }
+            val pad = dp(14)
+            setPadding(pad, pad, pad, pad)
+        }
+        val size = dp(58)
+        val params = WindowManager.LayoutParams(
+            size, size,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = dp(8)
+            y = dp(220)
+        }
+
+        var downX = 0f; var downY = 0f; var startX = 0; var startY = 0
+        var moved = false
+        tv.setOnTouchListener { v, e ->
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = e.rawX; downY = e.rawY
+                    startX = params.x; startY = params.y
+                    moved = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (e.rawX - downX).toInt()
+                    val dy = (e.rawY - downY).toInt()
+                    if (dx * dx + dy * dy > dp(8) * dp(8)) moved = true
+                    params.x = startX + dx
+                    params.y = startY + dy
+                    wm?.updateViewLayout(v, params)
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!moved) takeScreenshot()
+                    true
+                }
+                else -> false
+            }
+        }
+        bubble = tv
+        wm?.addView(tv, params)
+    }
+
+    // ---------- screenshot + share ----------
+
+    private fun takeScreenshot() {
+        val reader = captureReader
+        if (reader == null || mediaProjection == null) {
+            Toast.makeText(this, "Screen capture not granted — open SnapAsk and allow it",
+                Toast.LENGTH_LONG).show()
+            return
+        }
+        bubble?.visibility = View.INVISIBLE
+        Thread {
+            try {
+                Thread.sleep(250) // let the bubble disappear
+                // Persistent reader: drop any stale frame, then grab the latest.
+                var image = reader.acquireLatestImage()
+                var tries = 0
+                while (image == null && tries < 40) {
+                    Thread.sleep(100); tries++
+                    try { image = reader.acquireLatestImage() } catch (_: Exception) { break }
+                }
+                if (image == null) throw IllegalStateException("no frame captured")
+                val metrics = resources.displayMetrics
+                val w = metrics.widthPixels
+                val h = metrics.heightPixels
+                val planes = image.planes
+                val buffer = planes[0].buffer
+                val pixelStride = planes[0].pixelStride
+                val rowStride = planes[0].rowStride
+                val rowPadding = rowStride - pixelStride * w
+                var bmp = Bitmap.createBitmap(
+                    w + rowPadding / pixelStride, h, Bitmap.Config.ARGB_8888)
+                bmp.copyPixelsFromBuffer(buffer)
+                image.close()
+                bmp = Bitmap.createBitmap(bmp, 0, 0, w, h)
+
+                val dir = File(cacheDir, "shots").apply { mkdirs() }
+                // keep only the newest 10 shots
+                dir.listFiles()?.sortedBy { it.lastModified() }
+                    ?.dropLast(9)?.forEach { try { it.delete() } catch (_: Exception) {} }
+                val file = File(dir, "shot_${System.currentTimeMillis()}.png")
+                FileOutputStream(file).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                bmp.recycle()
+                handler.post { shareShot(file) }
+            } catch (t: Throwable) {
+                handler.post {
+                    Toast.makeText(this, "Screenshot failed: ${t.message}",
+                        Toast.LENGTH_LONG).show()
+                }
+            } finally {
+                // NOTE: the persistent VirtualDisplay/ImageReader stay alive
+                // across taps; only the bubble visibility is restored here.
+                handler.post { bubble?.visibility = View.VISIBLE }
+            }
+        }.start()
+    }
+
+    private fun shareShot(file: File) {
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "image/png"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        var pkg = prefs.getString(KEY_TARGET_PKG, null)
+        var cls = prefs.getString(KEY_TARGET_CLS, null)
+        if (pkg == null || cls == null) {
+            // No explicit choice (setup step 4 was skipped): auto-select the
+            // Muse app when it is installed, so tapping the bubble goes
+            // straight there instead of showing the chooser every time.
+            resolveMuseTarget()?.let { (mp, mc) ->
+                pkg = mp; cls = mc
+                prefs.edit()
+                    .putString(KEY_TARGET_PKG, mp)
+                    .putString(KEY_TARGET_CLS, mc)
+                    .apply()
+            }
+        }
+        val targetPkg: String? = pkg
+        val targetCls: String? = cls
+        if (targetPkg != null && targetCls != null) {
+            send.component = ComponentName(targetPkg, targetCls)
+        }
+        // Back from the target app returns to the app the user was in.
+        // The chooser wrapper needs its own NEW_TASK flag: it is a separate
+        // Intent launched from a Service, and does not inherit flags from `send`.
+        val launch = if (send.component == null)
+            Intent.createChooser(send, "Ask about this screenshot in…").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        else send
+        try {
+            startActivity(launch)
+        } catch (e: android.content.ActivityNotFoundException) {
+            // The saved target was uninstalled (or otherwise can't handle the
+            // intent). Forget it so the next tap re-resolves, and fall back to
+            // the chooser instead of crashing the service (which would kill
+            // the bubble).
+            prefs.edit()
+                .remove(KEY_TARGET_PKG)
+                .remove(KEY_TARGET_CLS)
+                .apply()
+            android.util.Log.w("SnapAsk",
+                "Saved share target missing, falling back to chooser", e)
+            val chooser = Intent.createChooser(send.apply { component = null },
+                "Ask about this screenshot in…").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            try {
+                startActivity(chooser)
+            } catch (e2: android.content.ActivityNotFoundException) {
+                handler.post {
+                    Toast.makeText(this,
+                        "No app available to receive the screenshot",
+                        Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Muse-like palette -->
+    <color name="muse_blue">#2563EB</color>
+    <color name="muse_blue_dark">#1D4ED8</color>
+    <color name="muse_blue_tint">#EAF1FE</color>
+    <color name="bg">#F4F6FB</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="text_primary">#161A23</color>
+    <color name="text_secondary">#5B6472</color>
+    <color name="success">#16A34A</color>
+    <color name="success_tint">#E7F6EC</color>
+    <color name="warning">#D97706</color>
+    <color name="warning_tint">#FEF3E2</color>
+    <color name="stroke">#E3E8F0</color>
+</resources>
