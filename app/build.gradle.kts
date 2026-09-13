@@ -11,8 +11,8 @@ android {
         applicationId = "com.snapask.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 9
-        versionName = "1.2.6"
+        versionCode = 13
+        versionName = "1.2.10"
     }
 
     buildTypes {

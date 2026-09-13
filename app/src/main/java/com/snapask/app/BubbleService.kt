@@ -56,19 +56,22 @@ class BubbleService : Service() {
     private var bubble: View? = null
     private var wm: WindowManager? = null
     private val handler = Handler(Looper.getMainLooper())
-    // The one-shot consent Intent we already built a projection from.
-    // Android 14 throws SecurityException ("Don't re-use the resultData...")
-    // if the same resultData is handed to getMediaProjection() twice, so we
-    // must skip redelivered/duplicate one-shot start commands. Scoped to
-    // one-shot only: persistent consents must never be deduped by intent
-    // content (separate grants can look identical, which wrongly skipped
-    // building the session after toggling instant mode on).
-    private var usedOneShotFingerprint: String? = null
+    // Guards against a duplicate/redelivered one-shot start command while a
+    // capture is already being built. Deliberately NOT a sticky fingerprint
+    // of "seen" consent data: separate user grants can produce identical
+    // Intent URIs, and remembering them silently skipped legitimate taps
+    // (e.g. per-tap capture after toggling instant mode off).
+    private var oneShotInFlight = false
     // Persistent capture pipeline: one VirtualDisplay + ImageReader per
     // projection, reused for every tap. Creating/releasing a display per tap
     // is what trips Android 14's reuse protections.
     private var captureReader: ImageReader? = null
     private var captureDisplay: VirtualDisplay? = null
+    // Set before WE call mediaProjection.stop() (e.g. toggling instant mode
+    // off). The registered onStop() callback must not kill the bubble for an
+    // intentional stop — only for a system-initiated one (user revoking the
+    // projection from the status bar).
+    private var intentionalProjectionStop = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -84,6 +87,7 @@ class BubbleService : Service() {
         // session immediately (idempotent when nothing is held).
         if (intent?.action == ACTION_RELEASE_CAPTURE) {
             releaseCapture()
+            intentionalProjectionStop = true
             try { mediaProjection?.stop() } catch (_: Exception) {}
             mediaProjection = null
             // Drop back to the non-projection foreground type.
@@ -100,15 +104,13 @@ class BubbleService : Service() {
         if (rc == Activity.RESULT_OK && data != null) {
             val oneShot = intent?.getBooleanExtra(EXTRA_ONE_SHOT, false) == true
             if (oneShot) {
-                // Skip duplicate/redelivered one-shot commands carrying data
-                // we already used.
-                // NOTE: use toUri (includes extras) — filterEquals() ignores
-                // extras and would wrongly match a *fresh* consent.
-                val fingerprint = data.toUri(Intent.URI_INTENT_SCHEME)
-                if (fingerprint == usedOneShotFingerprint) {
+                // Skip a duplicate/redelivered command only while a capture
+                // is already being built — never by remembering past consent
+                // data (separate grants can look identical).
+                if (oneShotInFlight) {
                     return START_STICKY
                 }
-                usedOneShotFingerprint = fingerprint
+                oneShotInFlight = true
             } else if (mediaProjection != null && captureReader != null) {
                 // Persistent mode: already holding a live session, ignore the
                 // redelivery. A fresh consent with no live session must always
@@ -126,23 +128,27 @@ class BubbleService : Service() {
                     // Android 14+ getMediaProjection() itself throws
                     // SecurityException unless the caller already runs a
                     // foreground service of that type.
-                    startAsForeground(projectionType = true)
-                    val mp = try {
-                        mpm.getMediaProjection(rc, data)
-                    } catch (t: Throwable) {
-                        startAsForeground() // drop back to specialUse
-                        throw t
-                    }
-                    // Android 14+ (target 34): a callback must be registered
-                    // before createVirtualDisplay, or it throws SecurityException.
-                    mp.registerCallback(object : MediaProjection.Callback() {},
-                        handler)
                     try {
-                        oneShotCapture(mp)
+                        startAsForeground(projectionType = true)
+                        val mp = try {
+                            mpm.getMediaProjection(rc, data)
+                        } catch (t: Throwable) {
+                            startAsForeground() // drop back to specialUse
+                            throw t
+                        }
+                        // Android 14+ (target 34): a callback must be registered
+                        // before createVirtualDisplay, or it throws SecurityException.
+                        mp.registerCallback(object : MediaProjection.Callback() {},
+                            handler)
+                        try {
+                            oneShotCapture(mp)
+                        } finally {
+                            try { mp.stop() } catch (_: Exception) {}
+                            // Drop back to specialUse: no lingering red indicator.
+                            startAsForeground()
+                        }
                     } finally {
-                        try { mp.stop() } catch (_: Exception) {}
-                        // Drop back to specialUse: no lingering red indicator.
-                        startAsForeground()
+                        oneShotInFlight = false
                     }
                     return START_STICKY
                 }
@@ -160,9 +166,12 @@ class BubbleService : Service() {
                 }
                 // Android 14+ (target 34): a callback must be registered before
                 // createVirtualDisplay, or it throws SecurityException.
+                // Fresh projection: from here on, an onStop is unexpected and
+                // should close the bubble.
+                intentionalProjectionStop = false
                 mediaProjection?.registerCallback(object : MediaProjection.Callback() {
                     override fun onStop() {
-                        handler.post { stopSelf() }
+                        if (!intentionalProjectionStop) handler.post { stopSelf() }
                     }
                 }, handler)
                 setupCapture()
@@ -171,6 +180,7 @@ class BubbleService : Service() {
                 // capturing).
             } catch (t: Throwable) {
                 releaseCapture()
+                intentionalProjectionStop = true
                 try { mediaProjection?.stop() } catch (_: Exception) {}
                 mediaProjection = null
                 handler.post {
@@ -314,27 +324,12 @@ class BubbleService : Service() {
 
         var downX = 0f; var downY = 0f; var startX = 0; var startY = 0
         var moved = false
-        var longPressed = false
-        val longPress = Runnable {
-            longPressed = true
-            tv.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
-            hideCloseTarget()
-            try {
-                startActivity(Intent(this, MainActivity::class.java)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            } catch (t: Throwable) {
-                Toast.makeText(this, "Couldn't open SnapAsk: ${t.message}",
-                    Toast.LENGTH_SHORT).show()
-            }
-        }
         tv.setOnTouchListener { v, e ->
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = e.rawX; downY = e.rawY
                     startX = params.x; startY = params.y
                     moved = false
-                    longPressed = false
-                    handler.postDelayed(longPress, 600)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -342,7 +337,6 @@ class BubbleService : Service() {
                     val dy = (e.rawY - downY).toInt()
                     if (dx * dx + dy * dy > dp(8) * dp(8)) {
                         moved = true
-                        handler.removeCallbacks(longPress)
                         showCloseTarget()
                     }
                     params.x = startX + dx
@@ -352,10 +346,7 @@ class BubbleService : Service() {
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    handler.removeCallbacks(longPress)
-                    if (longPressed) {
-                        longPressed = false
-                    } else if (moved && closeTargetArmed) {
+                    if (moved && closeTargetArmed) {
                         hideCloseTarget()
                         stopSelf() // dropped on the X: close the bubble
                     } else {
@@ -366,10 +357,8 @@ class BubbleService : Service() {
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
-                    handler.removeCallbacks(longPress)
                     hideCloseTarget()
                     moved = false
-                    longPressed = false
                     true
                 }
                 else -> false

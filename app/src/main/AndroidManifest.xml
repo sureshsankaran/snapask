@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="5"
-    android:versionName="1.2.2">
+    android:versionCode="14"
+    android:versionName="1.2.11">
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -44,10 +44,15 @@
                 android:value="Keeps the SnapAsk floating bubble alive so a screenshot can be taken and asked about from any app." />
         </service>
 
-        <!-- Transparent gate for per-tap capture consent (no persistent icon). -->
+        <!-- Transparent gate for per-tap capture consent (no persistent icon).
+             Own taskAffinity so it never resurfaces the settings task: without
+             this, FLAG_ACTIVITY_NEW_TASK drops the gate onto the app's existing
+             task, flashing the settings screen (and the screenshot then captures
+             settings instead of what the user was looking at). -->
         <activity
             android:name=".CaptureGateActivity"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:taskAffinity="com.snapask.app.gate"
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:launchMode="singleTop" />

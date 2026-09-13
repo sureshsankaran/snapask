@@ -72,6 +72,13 @@ class MainActivity : ComponentActivity() {
         val btnNotif: Button = findViewById(R.id.btnNotif)
         val btnTarget: Button = findViewById(R.id.btnTarget)
 
+        // Build/version stamp so test builds are identifiable on device.
+        try {
+            val pinfo = packageManager.getPackageInfo(packageName, 0)
+            findViewById<TextView>(R.id.tvVersion).text =
+                "SnapAsk v${pinfo.versionName} (build ${pinfo.versionCode})"
+        } catch (_: Throwable) { }
+
         btnOverlay.setOnClickListener {
             startActivity(Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
