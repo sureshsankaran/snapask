@@ -9,6 +9,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
@@ -262,7 +263,8 @@ class BubbleService : Service() {
         val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("SnapAsk bubble is on")
             .setContentText("Tap the white bubble to screenshot & ask")
-            .setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setSmallIcon(R.drawable.ic_stat_snapask)
+            .setLargeIcon(BitmapFactory.decodeResource(resources, R.drawable.muse_large))
             .setOngoing(true)
             .build()
         // Android 14+ throws SecurityException if we claim the mediaProjection

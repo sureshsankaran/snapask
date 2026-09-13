@@ -81,6 +81,11 @@ build normally.
 
 ## Changelog
 
+- **v1.2.12** — notification icons: the status-bar glyph is now a custom
+  Muse-mascot silhouette (fluffy headphone-wearing creature, traced from the
+  actual character art — Android forces status-bar icons to monochrome, so a
+  clean redraw reads better than an auto-trace of the photo); the pulled-down
+  notification shows the full-color Muse mascot photo as its large icon.
 - **v1.2.11** — version is now bumped in the manifest (the source of truth
   for `build-manual.sh`) so the in-app version stamp is accurate; removed
   the long-press-to-open-settings gesture (tap = screenshot, drag = move,
