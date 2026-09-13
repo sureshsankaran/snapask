@@ -252,17 +252,29 @@ class BubbleService : Service() {
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
+    /** Clips [src] to a circle for the floating bubble. */
+    private fun circularBitmap(src: android.graphics.Bitmap): android.graphics.Bitmap {
+        val size = minOf(src.width, src.height)
+        val out = android.graphics.Bitmap.createBitmap(
+            size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(out)
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        canvas.drawCircle(size / 2f, size / 2f, size / 2f, paint)
+        paint.xfermode = android.graphics.PorterDuffXfermode(
+            android.graphics.PorterDuff.Mode.SRC_IN)
+        canvas.drawBitmap(src,
+            (size - src.width) / 2f, (size - src.height) / 2f, paint)
+        return out
+    }
+
     private fun addBubble() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         val tv = android.widget.ImageView(this).apply {
-            setImageResource(R.drawable.ic_muse)
-            // muse-blue M mark on a white bubble
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(0xFFFFFFFF.toInt()) // white
-            }
-            val pad = dp(11)
-            setPadding(pad, pad, pad, pad)
+            val raw = android.graphics.BitmapFactory.decodeResource(
+                resources, R.drawable.bubble_icon)
+            setImageBitmap(circularBitmap(raw))
+            background = null
+            setPadding(0, 0, 0, 0)
         }
         val size = dp(46)
         val params = WindowManager.LayoutParams(
